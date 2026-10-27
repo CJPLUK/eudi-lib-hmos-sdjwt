@@ -1,0 +1,34 @@
+eudi_lib_sdjwt
+Copyright (c) 2026 the eudi_lib_sdjwt contributors
+
+This product is a Cangjie (仓颉) port of the EU Digital Identity Wallet
+SD-JWT library for Swift:
+
+    eudi-lib-sdjwt-swift
+    Copyright (c) European Commission
+    Licensed under the Apache License, Version 2.0
+    https://github.com/eu-digital-identity-wallet/eudi-lib-sdjwt-swift
+
+The protocol logic (SD-JWT issuance, selective disclosure, verification,
+key binding) is reimplemented in Cangjie with the original Swift sources
+used as the reference implementation.
+
+This product depends on and/or bundles the following third-party software:
+
+  - eudi_lib_core_crypto (Apache License 2.0 expected; consumed as a pinned
+    third_party clone, not vendored) — real ECDSA P-256 / digest / JWS
+    primitives backed by Cangjie stdx.crypto.
+
+  - cangjie-stdx 1.1.3.1 (Apache License 2.0) — Cangjie extended standard
+    library runtime, bundled under entry/libs/stdx/. See the LICENSE file
+    shipped inside the upstream cangjie-stdx release archive.
+
+  - OpenSSL runtime libraries (libcrypto_openssl.z.so, libssl_openssl.z.so,
+    Apache License 2.0) and libsecurec.so, bundled under
+    entry/libs/arm64-v8a/ for on-device execution of stdx.crypto.
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may not
+use this project except in compliance with the License. You may obtain a
+copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0

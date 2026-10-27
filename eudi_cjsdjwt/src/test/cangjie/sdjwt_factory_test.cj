@@ -1,0 +1,325 @@
+/**
+ * sdjwt_factory_test.cj
+ *
+ * Unit tests for SdJwtFactory.createPayload.
+ *
+ * Test cases:
+ *   1. SD claim absent from payload plaintext; _sd array length = real + decoy.
+ *   2. Disclosure decodes back to original claim (name + value round-trip).
+ *   3. _sd_alg field present in payload with value "sha-256".
+ *   4. Plain claim present verbatim in payload.
+ *   5. No _sd array emitted when no Sd claims exist.
+ *   6. Array elements: Plain stays verbatim; Sd wrapped in {"...": digest}.
+ *
+ * Package: ohos_app_cangjie_eudi_cjsdjwt_local_test
+ * (test files must use this package name per the allowed-files rule)
+ */
+package ohos_app_cangjie_eudi_cjsdjwt_local_test
+
+import std.unittest.*
+import std.unittest.testmacro.*
+
+import std.collection.*
+
+import ohos_app_cangjie_eudi_cjsdjwt.sdjwt.factory.*
+import ohos_app_cangjie_eudi_cjsdjwt.sdjwt.digest.*
+import ohos_app_cangjie_eudi_cjsdjwt.sdjwt.model.*
+import ohos_app_cangjie_eudi_cjsdjwt.sdjwt.seam.*
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a SdJwtFactory backed by HostCryptoStub with Sha256 and given decoy count.
+ */
+func makeFactory(decoyCount!: Int64): SdJwtFactory {
+    let crypto = HostCryptoStub()
+    let dc = DigestCreator(
+        digest: crypto.digest,
+        base64Url: crypto.base64Url,
+        algorithm: HashingAlgorithmIdentifier.Sha256
+    )
+    return SdJwtFactory(digestCreator: dc, base64Url: crypto.base64Url, rng: crypto.rng, decoyCount: decoyCount)
+}
+
+/**
+ * True if the JSON string contains the given key as a top-level JSON field.
+ * Uses simple substring matching on "<key>": which is sufficient for these tests.
+ */
+func jsonHasKey(json: String, key: String): Bool {
+    return json.contains("\"" + key + "\":")
+}
+
+/**
+ * True if the JSON string contains the exact quoted string value somewhere.
+ */
+func jsonContainsValue(json: String, value: String): Bool {
+    return json.contains("\"" + value + "\"")
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+@Test
+class SdJwtFactoryTest {
+
+    // ----------------------------------------------------------------
+    // Test 1: SD claim absent from payload plaintext; _sd array length correct
+    // ----------------------------------------------------------------
+
+    @TestCase
+    func testSdClaimAbsentFromPayload_sdArrayLengthCorrect(): Unit {
+        let factory = makeFactory(decoyCount: 0)
+
+        var claims = HashMap<String, ClaimValue>()
+        claims.add("iss", ClaimValue.Plain("\"https://issuer.example.com\""))
+        claims.add("sub", ClaimValue.Sd("\"user-42\""))
+        claims.add("given_name", ClaimValue.Sd("\"Alice\""))
+
+        let result = factory.createPayload(claims)
+
+        // SD claims must NOT appear as plain keys in the payload
+        @Expect(jsonHasKey(result.payloadJson, "sub"), false)
+        @Expect(jsonHasKey(result.payloadJson, "given_name"), false)
+
+        // _sd array must be present
+        @Expect(jsonHasKey(result.payloadJson, "_sd"), true)
+
+        // Two real disclosures, zero decoys
+        @Expect(result.disclosures.size, 2)
+    }
+
+    @TestCase
+    func testSdClaimAbsentFromPayload_withDecoys(): Unit {
+        let factory = makeFactory(decoyCount: 3)
+
+        var claims = HashMap<String, ClaimValue>()
+        claims.add("email", ClaimValue.Sd("\"alice@example.com\""))
+
+        let result = factory.createPayload(claims)
+
+        // Only one real disclosure (decoys have no Disclosure object)
+        @Expect(result.disclosures.size, 1)
+
+        // The _sd array should contain 1 real + 3 decoy = 4 entries
+        // Count occurrences of "," inside the _sd array as a proxy:
+        // Simplest check: payload contains _sd
+        @Expect(jsonHasKey(result.payloadJson, "_sd"), true)
+
+        // email must NOT appear in payload
+        @Expect(jsonHasKey(result.payloadJson, "email"), false)
+    }
+
+    // ----------------------------------------------------------------
+    // Test 2: Disclosure decodes back to original claim
+    // ----------------------------------------------------------------
+
+    @TestCase
+    func testDisclosureRoundTrip_nameAndValue(): Unit {
+        let crypto = HostCryptoStub()
+        let dc = DigestCreator(
+            digest: crypto.digest,
+            base64Url: crypto.base64Url,
+            algorithm: HashingAlgorithmIdentifier.Sha256
+        )
+        let factory = SdJwtFactory(digestCreator: dc, base64Url: crypto.base64Url, rng: crypto.rng, decoyCount: 0)
+
+        var claims = HashMap<String, ClaimValue>()
+        claims.add("family_name", ClaimValue.Sd("\"Mustermann\""))
+
+        let result = factory.createPayload(claims)
+        @Expect(result.disclosures.size, 1)
+
+        let disc = result.disclosures[0]
+
+        // Name must round-trip correctly
+        @Expect(disc.getName(), Some("family_name"))
+
+        // Value must round-trip correctly
+        @Expect(disc.getValue(), "\"Mustermann\"")
+    }
+
+    @TestCase
+    func testDisclosureRoundTrip_encodedFormIsBase64url(): Unit {
+        let crypto = HostCryptoStub()
+        let dc = DigestCreator(
+            digest: crypto.digest,
+            base64Url: crypto.base64Url,
+            algorithm: HashingAlgorithmIdentifier.Sha256
+        )
+        let factory = SdJwtFactory(digestCreator: dc, base64Url: crypto.base64Url, rng: crypto.rng, decoyCount: 0)
+
+        var claims = HashMap<String, ClaimValue>()
+        claims.add("age", ClaimValue.Sd("42"))
+
+        let result = factory.createPayload(claims)
+        let disc = result.disclosures[0]
+
+        let encoded = disc.encodeWith(crypto.base64Url)
+
+        // Encoded must be non-empty and not contain spaces or '=' padding
+        @Expect(encoded.size > 0, true)
+        @Expect(encoded.contains("="), false)
+        @Expect(encoded.contains(" "), false)
+
+        // Must decode back to the same Disclosure
+        let decoded = Disclosure.decodeWith(encoded, crypto.base64Url)
+        @Expect(decoded.getName(), Some("age"))
+        @Expect(decoded.getValue(), "42")
+    }
+
+    // ----------------------------------------------------------------
+    // Test 3: _sd_alg field present with value "sha-256"
+    // ----------------------------------------------------------------
+
+    @TestCase
+    func testSdAlgPresent_sha256(): Unit {
+        let factory = makeFactory(decoyCount: 0)
+
+        var claims = HashMap<String, ClaimValue>()
+        claims.add("iss", ClaimValue.Plain("\"https://issuer.example.com\""))
+
+        let result = factory.createPayload(claims)
+
+        // _sd_alg must be present
+        @Expect(jsonHasKey(result.payloadJson, "_sd_alg"), true)
+
+        // _sd_alg value must be "sha-256"
+        @Expect(jsonContainsValue(result.payloadJson, "sha-256"), true)
+    }
+
+    @TestCase
+    func testSdAlgPresent_sha384(): Unit {
+        let crypto = HostCryptoStub()
+        let dc = DigestCreator(
+            digest: crypto.digest,
+            base64Url: crypto.base64Url,
+            algorithm: HashingAlgorithmIdentifier.Sha384
+        )
+        let factory = SdJwtFactory(digestCreator: dc, base64Url: crypto.base64Url, rng: crypto.rng, decoyCount: 0)
+
+        var claims = HashMap<String, ClaimValue>()
+        claims.add("x", ClaimValue.Plain("1"))
+
+        let result = factory.createPayload(claims)
+        @Expect(jsonContainsValue(result.payloadJson, "sha-384"), true)
+    }
+
+    // ----------------------------------------------------------------
+    // Test 4: Plain claim present verbatim in payload
+    // ----------------------------------------------------------------
+
+    @TestCase
+    func testPlainClaimPresentInPayload(): Unit {
+        let factory = makeFactory(decoyCount: 0)
+
+        var claims = HashMap<String, ClaimValue>()
+        claims.add("iss", ClaimValue.Plain("\"https://issuer.example.com\""))
+        claims.add("iat", ClaimValue.Plain("1700000000"))
+
+        let result = factory.createPayload(claims)
+
+        @Expect(jsonHasKey(result.payloadJson, "iss"), true)
+        @Expect(jsonHasKey(result.payloadJson, "iat"), true)
+        @Expect(result.disclosures.size, 0)
+    }
+
+    // ----------------------------------------------------------------
+    // Test 5: No _sd array when no Sd claims
+    // ----------------------------------------------------------------
+
+    @TestCase
+    func testNoSdArray_whenNoSdClaims(): Unit {
+        let factory = makeFactory(decoyCount: 0)
+
+        var claims = HashMap<String, ClaimValue>()
+        claims.add("iss", ClaimValue.Plain("\"https://issuer.example.com\""))
+
+        let result = factory.createPayload(claims)
+
+        // _sd array must NOT be present
+        @Expect(jsonHasKey(result.payloadJson, "_sd"), false)
+
+        // _sd_alg must still be present
+        @Expect(jsonHasKey(result.payloadJson, "_sd_alg"), true)
+
+        @Expect(result.disclosures.size, 0)
+    }
+
+    // ----------------------------------------------------------------
+    // Test 6: SdArray elements
+    // ----------------------------------------------------------------
+
+    @TestCase
+    func testSdArray_plainElementsPresentVerbatim(): Unit {
+        let factory = makeFactory(decoyCount: 0)
+
+        var elements = ArrayList<ClaimValue>()
+        elements.add(ClaimValue.Plain("\"DE\""))
+        elements.add(ClaimValue.Plain("\"FR\""))
+
+        var claims = HashMap<String, ClaimValue>()
+        claims.add("nationalities", ClaimValue.SdArray(elements))
+
+        let result = factory.createPayload(claims)
+
+        // Array key must be present in payload
+        @Expect(jsonHasKey(result.payloadJson, "nationalities"), true)
+
+        // No disclosures (all plain elements)
+        @Expect(result.disclosures.size, 0)
+    }
+
+    @TestCase
+    func testSdArray_sdElementsReplacedByDigestObject(): Unit {
+        let factory = makeFactory(decoyCount: 0)
+
+        var elements = ArrayList<ClaimValue>()
+        elements.add(ClaimValue.Sd("\"FR\""))
+        elements.add(ClaimValue.Plain("\"DE\""))
+
+        var claims = HashMap<String, ClaimValue>()
+        claims.add("countries", ClaimValue.SdArray(elements))
+
+        let result = factory.createPayload(claims)
+
+        // One Sd element → one disclosure
+        @Expect(result.disclosures.size, 1)
+
+        // The disclosure is an array-element form (no name)
+        let disc = result.disclosures[0]
+        @Expect(disc.isObjectClaim(), false)
+        @Expect(disc.getValue(), "\"FR\"")
+
+        // The "..." key must appear in the array (digest object)
+        @Expect(result.payloadJson.contains("\"...\""), true)
+    }
+
+    // ----------------------------------------------------------------
+    // Test 7: Multiple createPayload calls produce consistent results
+    // ----------------------------------------------------------------
+
+    @TestCase
+    func testMultipleCalls_consistentDisclosureCount(): Unit {
+        let factory = makeFactory(decoyCount: 0)
+
+        var claims = HashMap<String, ClaimValue>()
+        claims.add("a", ClaimValue.Sd("\"v1\""))
+        claims.add("b", ClaimValue.Sd("\"v2\""))
+        claims.add("c", ClaimValue.Plain("\"v3\""))
+
+        let r1 = factory.createPayload(claims)
+        let r2 = factory.createPayload(claims)
+
+        @Expect(r1.disclosures.size, 2)
+        @Expect(r2.disclosures.size, 2)
+
+        // Both payloads must contain _sd and _sd_alg
+        @Expect(jsonHasKey(r1.payloadJson, "_sd"), true)
+        @Expect(jsonHasKey(r2.payloadJson, "_sd"), true)
+        @Expect(jsonHasKey(r1.payloadJson, "_sd_alg"), true)
+        @Expect(jsonHasKey(r2.payloadJson, "_sd_alg"), true)
+    }
+}

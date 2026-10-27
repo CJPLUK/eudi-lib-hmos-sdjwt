@@ -1,0 +1,178 @@
+/**
+ * compact_codec_test.cj
+ *
+ * Unit tests for CompactSerialiser and CompactParser.
+ *
+ * Verifies:
+ *   - parse(serialise(x)) == x for all three boundary cases.
+ *   - ~ separation rules match IETF SD-JWT format.
+ *   - Edge cases: empty disclosures, with/without kbJwt.
+ */
+package ohos_app_cangjie_eudi_cjsdjwt_local_test
+
+import std.unittest.*
+import std.unittest.testmacro.*
+
+import ohos_app_cangjie_eudi_cjsdjwt.sdjwt.model.*
+import ohos_app_cangjie_eudi_cjsdjwt.sdjwt.seam.*
+import ohos_app_cangjie_eudi_cjsdjwt.sdjwt.codec.*
+
+// ---------------------------------------------------------------------------
+// Helper: build a minimal Disclosure using HostBase64UrlImpl
+// ---------------------------------------------------------------------------
+
+func makeDisclosure(b64: Base64Url, salt: String, name: String, value: String): Disclosure {
+    return Disclosure(salt: salt, name: name, value: value)
+}
+
+@Test
+class CompactCodecRoundTripTest {
+
+    // Case 1: No disclosures, no KB-JWT
+    // Expected format: jwt~
+    @TestCase
+    func testEmptyDisclosuresNoKbJwt(): Unit {
+        let b64 = HostBase64UrlImpl()
+        let ser = CompactSerialiser(b64: b64)
+        let par = CompactParser(b64: b64)
+
+        let original = SignedSdJwt(
+            jwt: Jwt(compactSerialization: "header.payload.sig"),
+            disclosures: Array<Disclosure>(),
+            kbJwt: None
+        )
+
+        let compact = ser.serialise(original)
+        // Must end with ~ and have exactly one ~ (after jwt part)
+        @Expect(compact.endsWith("~"))
+        @Expect(compact, "header.payload.sig~")
+
+        let parsed = par.parse(compact)
+        @Expect(parsed.jwt.compactSerialization, original.jwt.compactSerialization)
+        @Expect(parsed.disclosures.size, 0)
+        @Expect(parsed.kbJwt.isNone())
+    }
+
+    // Case 2: With disclosures, no KB-JWT
+    // Expected format: jwt~d1~d2~
+    @TestCase
+    func testWithDisclosuresNoKbJwt(): Unit {
+        let b64 = HostBase64UrlImpl()
+        let ser = CompactSerialiser(b64: b64)
+        let par = CompactParser(b64: b64)
+
+        let disc1 = Disclosure(salt: "salt1", name: "given_name", value: "\"Alice\"")
+        let disc2 = Disclosure(salt: "salt2", name: "family_name", value: "\"Smith\"")
+
+        let original = SignedSdJwt(
+            jwt: Jwt(compactSerialization: "header.payload.sig"),
+            disclosures: [disc1, disc2],
+            kbJwt: None
+        )
+
+        let compact = ser.serialise(original)
+        @Expect(compact.endsWith("~"))
+        // Format: jwt~d1~d2~
+        let parts = compact.split("~")
+        // split on "~" with trailing ~ gives last empty element
+        @Expect(parts.size, 4)  // ["jwt", "d1", "d2", ""]
+        @Expect(parts[0], "header.payload.sig")
+
+        let parsed = par.parse(compact)
+        @Expect(parsed.jwt.compactSerialization, "header.payload.sig")
+        @Expect(parsed.disclosures.size, 2)
+        @Expect(parsed.kbJwt.isNone())
+
+        // Verify disclosure round-trip
+        @Expect(parsed.disclosures[0].getSalt(), "salt1")
+        @Expect(parsed.disclosures[0].getName(), Some("given_name"))
+        @Expect(parsed.disclosures[1].getSalt(), "salt2")
+        @Expect(parsed.disclosures[1].getName(), Some("family_name"))
+    }
+
+    // Case 3: No disclosures, with KB-JWT
+    // Expected format: jwt~kbjwt
+    @TestCase
+    func testEmptyDisclosuresWithKbJwt(): Unit {
+        let b64 = HostBase64UrlImpl()
+        let ser = CompactSerialiser(b64: b64)
+        let par = CompactParser(b64: b64)
+
+        let original = SignedSdJwt(
+            jwt: Jwt(compactSerialization: "header.payload.sig"),
+            disclosures: Array<Disclosure>(),
+            kbJwt: Some(Jwt(compactSerialization: "kb.payload.kbsig"))
+        )
+
+        let compact = ser.serialise(original)
+        // Must NOT end with ~
+        @Expect(!compact.endsWith("~"))
+        @Expect(compact, "header.payload.sig~kb.payload.kbsig")
+
+        let parsed = par.parse(compact)
+        @Expect(parsed.jwt.compactSerialization, "header.payload.sig")
+        @Expect(parsed.disclosures.size, 0)
+        match (parsed.kbJwt) {
+            case Some(kb) => @Expect(kb.compactSerialization, "kb.payload.kbsig")
+            case None => @Expect(false)
+        }
+    }
+
+    // Case 4: With disclosures and KB-JWT
+    // Expected format: jwt~d1~d2~kbjwt
+    @TestCase
+    func testWithDisclosuresAndKbJwt(): Unit {
+        let b64 = HostBase64UrlImpl()
+        let ser = CompactSerialiser(b64: b64)
+        let par = CompactParser(b64: b64)
+
+        let disc1 = Disclosure(salt: "s1", name: "sub", value: "\"user42\"")
+
+        let original = SignedSdJwt(
+            jwt: Jwt(compactSerialization: "header.payload.sig"),
+            disclosures: [disc1],
+            kbJwt: Some(Jwt(compactSerialization: "kb.payload.kbsig"))
+        )
+
+        let compact = ser.serialise(original)
+        @Expect(!compact.endsWith("~"))
+
+        let parsed = par.parse(compact)
+        @Expect(parsed.jwt.compactSerialization, "header.payload.sig")
+        @Expect(parsed.disclosures.size, 1)
+        @Expect(parsed.disclosures[0].getSalt(), "s1")
+        match (parsed.kbJwt) {
+            case Some(kb) => @Expect(kb.compactSerialization, "kb.payload.kbsig")
+            case None => @Expect(false)
+        }
+    }
+
+    // Verify serialise produces the exact ~ structure mandated by IETF
+    @TestCase
+    func testIetfFormatStructure(): Unit {
+        let b64 = HostBase64UrlImpl()
+        let ser = CompactSerialiser(b64: b64)
+
+        let disc = Disclosure(salt: "abc", name: "age", value: "42")
+
+        // With one disclosure, no kbJwt => jwt~<d1>~
+        let sdJwt1 = SignedSdJwt(
+            jwt: Jwt(compactSerialization: "J"),
+            disclosures: [disc],
+            kbJwt: None
+        )
+        let c1 = ser.serialise(sdJwt1)
+        @Expect(c1.startsWith("J~"))
+        @Expect(c1.endsWith("~"))
+
+        // With one disclosure and kbJwt => jwt~<d1>~kbjwt
+        let sdJwt2 = SignedSdJwt(
+            jwt: Jwt(compactSerialization: "J"),
+            disclosures: [disc],
+            kbJwt: Some(Jwt(compactSerialization: "KB"))
+        )
+        let c2 = ser.serialise(sdJwt2)
+        @Expect(c2.endsWith("~KB"))
+        @Expect(!c2.endsWith("~~KB"))
+    }
+}

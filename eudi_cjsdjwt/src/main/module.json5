@@ -1,0 +1,9 @@
+{
+  "module": {
+    "name": "eudi_cjsdjwt",
+    "type": "har",
+    "deviceTypes": [
+      "default"
+    ]
+  }
+}
